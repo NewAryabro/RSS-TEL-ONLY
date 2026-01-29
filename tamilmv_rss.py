@@ -6,7 +6,7 @@ import time, json, os
 from urllib.parse import parse_qs, urlparse
 
 # ================= CONFIG =================
-BASE_URL = "https://www.1tamilmv.haus/"   # 🔴 ONE BASE URL ONLY
+BASE_URL = "https://www.1tamilmv.rsvp/"   # 🔴 ONE BASE URL ONLY
 OUT_FILE = "tamilmv.xml"
 STATE_FILE = "state.json"
 

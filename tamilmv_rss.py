@@ -1,120 +1,118 @@
-import cloudscraper
+import cloudscraper, time, json, os
 from bs4 import BeautifulSoup
 from datetime import datetime
+from urllib.parse import urlparse, parse_qs
 from xml.etree.ElementTree import Element, SubElement, ElementTree
-import time, json, os
-from urllib.parse import parse_qs, urlparse
 
-# ================= CONFIG =================
-BASE_URL = "https://www.1tamilmv.rsvp/"   # 🔴 ONE BASE URL ONLY
+BASE_URL = "https://www.1tamilmv.rsvp/"
 OUT_FILE = "tamilmv.xml"
 STATE_FILE = "state.json"
 
-TOPIC_LIMIT = 50              # 🚨 High → no post miss
-TOPIC_DELAY = 3               # Seconds between topic fetch
-MAX_MAGNETS_PER_RUN = 25      # 🚑 Flood protection (per cron)
-MAX_SIZE_GB = 4               # ⛔ Skip >4GB torrents
-# ==========================================
+TOPIC_LIMIT = 100        # 🔥 never miss
+TOPIC_DELAY = 2
+MAX_PER_RUN = 25
 
-# Cloudflare bypass
-scraper = cloudscraper.create_scraper(
-    browser={"browser": "chrome", "platform": "windows", "mobile": False}
-)
+MOVIE_MAX_GB = 4         # 🎬 movie rule
+SERIES_MIN_GB = 4        # 📺 series allowed
 
-# ---------------- Load state ----------------
+scraper = cloudscraper.create_scraper()
+
+# ---------- STATE ----------
 if os.path.exists(STATE_FILE):
-    with open(STATE_FILE, "r") as f:
-        state = json.load(f)
+    state = json.load(open(STATE_FILE))
 else:
-    state = {"magnets": []}
+    state = {"posts": {}, "magnets": []}
 
-processed = set(state.get("magnets", []))
+seen_posts = state["posts"]
+seen_magnets = set(state["magnets"])
 
-# ---------------- RSS setup ----------------
+# ---------- RSS ----------
 rss = Element("rss", version="2.0")
 channel = SubElement(rss, "channel")
-
 SubElement(channel, "title").text = "1TamilMV Torrent RSS"
 SubElement(channel, "link").text = BASE_URL
-SubElement(channel, "description").text = "Auto RSS – No Miss – Below 4GB"
+SubElement(channel, "description").text = "Auto RSS – No Miss – Smart Size Filter"
 SubElement(channel, "lastBuildDate").text = datetime.utcnow().strftime(
     "%a, %d %b %Y %H:%M:%S GMT"
 )
 
-# ---------------- Fetch homepage ----------------
-home = scraper.get(BASE_URL, timeout=30)
-soup = BeautifulSoup(home.text, "lxml")
-
-# Collect latest topics (NO SKIP)
-posts = []
-for a in soup.select("a[href*='forums/topic']"):
-    title = a.get_text(strip=True)
-    link = a["href"]
-    posts.append((title, link))
-
-posts = posts[:TOPIC_LIMIT]
-
-def magnet_size_gb(magnet):
+# ---------- HELPERS ----------
+def size_gb(magnet):
     qs = parse_qs(urlparse(magnet).query)
     if "xl" in qs:
         return int(qs["xl"][0]) / (1024 ** 3)
     return None
 
-# ---------------- Scrape topics ----------------
-added_count = 0
+def is_series(title):
+    return any(x in title.lower() for x in ["season", "s01", "s02", "episode", "ep"])
 
-for title, post_url in posts:
-    if added_count >= MAX_MAGNETS_PER_RUN:
-        print("🚑 Flood limit reached")
+# ---------- FETCH POSTS ----------
+home = scraper.get(BASE_URL, timeout=30)
+soup = BeautifulSoup(home.text, "lxml")
+
+post_links = []
+for a in soup.find_all("a", href=True):
+    if "/topic/" in a["href"]:
+        link = a["href"]
+        if not link.startswith("http"):
+            link = BASE_URL.rstrip("/") + "/" + link.lstrip("/")
+        post_links.append(link)
+
+post_links = list(dict.fromkeys(post_links))[:TOPIC_LIMIT]
+
+# ---------- SCRAPE ----------
+added = 0
+
+for post in post_links:
+    if added >= MAX_PER_RUN:
         break
+
+    if post not in seen_posts:
+        seen_posts[post] = {"checked": 0}
 
     try:
         time.sleep(TOPIC_DELAY)
-
-        page = scraper.get(post_url, timeout=30)
+        page = scraper.get(post, timeout=30)
         psoup = BeautifulSoup(page.text, "lxml")
+        title = psoup.title.get_text(strip=True)
 
-        # 🔥 VERY IMPORTANT
-        # Same post ni malli malli open chestham
-        # But magnet already state.json lo unte skip
         for a in psoup.find_all("a", href=True):
             magnet = a["href"]
-
             if not magnet.startswith("magnet:?"):
                 continue
-
-            if magnet in processed:
-                continue   # ✅ Magnet-level protection
-
-            size = magnet_size_gb(magnet)
-            if size and size > MAX_SIZE_GB:
+            if magnet in seen_magnets:
                 continue
 
-            # Add RSS item
+            size = size_gb(magnet)
+            if size:
+                if is_series(title):
+                    if size < SERIES_MIN_GB:
+                        continue
+                else:
+                    if size > MOVIE_MAX_GB:
+                        continue
+
             item = SubElement(channel, "item")
-            SubElement(item, "title").text = (
-                f"{title} [{round(size,2)}GB]" if size else title
-            )
+            SubElement(item, "title").text = f"{title} [{round(size,2)}GB]" if size else title
             SubElement(item, "link").text = magnet
             SubElement(item, "guid").text = magnet
             SubElement(item, "pubDate").text = datetime.utcnow().strftime(
                 "%a, %d %b %Y %H:%M:%S GMT"
             )
 
-            processed.add(magnet)
-            added_count += 1
-            print("➕ ADDED:", title, size)
-
-            if added_count >= MAX_MAGNETS_PER_RUN:
-                break
+            seen_magnets.add(magnet)
+            added += 1
+            print("➕", title)
 
     except Exception as e:
-        print("ERROR:", title, e)
+        print("ERR:", post, e)
 
-# ---------------- SAVE FILES (ALWAYS) ----------------
+# ---------- SAVE ----------
 ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
+json.dump(
+    {"posts": seen_posts, "magnets": list(seen_magnets)},
+    open(STATE_FILE, "w"),
+    indent=2
+)
 
-with open(STATE_FILE, "w") as f:
-    json.dump({"magnets": list(processed)}, f, indent=2)
-
-print(f"✅ DONE | Added this run: {added_count}")
+print("✅ DONE | Added:", added)

@@ -3,22 +3,22 @@ from bs4 import BeautifulSoup
 from datetime import datetime
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 
-# =============== CONFIG =================
+# ================= CONFIG =================
 BASE_URL = "https://www.1tamilmv.rsvp/"
 OUT_FILE = "tamilmv.xml"
 STATE_FILE = "state.json"
 
-MAX_TOPICS = 50
+MAX_TOPICS = 60
 MAX_ITEMS = 25
 DELAY = 2
 
 MOVIE_MAX_GB = 4
 SERIES_MIN_GB = 4
-# =======================================
+# ========================================
 
 scraper = cloudscraper.create_scraper()
 
-# =============== STATE ==================
+# ================= STATE =================
 if os.path.exists(STATE_FILE):
     state = json.load(open(STATE_FILE))
 else:
@@ -26,18 +26,19 @@ else:
 
 seen = set(state.get("magnets", []))
 
-# =============== RSS ====================
+# ================= RSS ===================
 rss = Element("rss", version="2.0")
 channel = SubElement(rss, "channel")
 
 SubElement(channel, "title").text = "1TamilMV Torrent RSS"
 SubElement(channel, "link").text = BASE_URL
-SubElement(channel, "description").text = "Auto RSS – Telugu / English Only – ≤4GB Movies"
+SubElement(channel, "description").text = "Auto RSS – Telugu / English Only – Smart Filter"
 SubElement(channel, "lastBuildDate").text = datetime.utcnow().strftime(
     "%a, %d %b %Y %H:%M:%S GMT"
 )
 
-# =============== HELPERS =================
+# ================= HELPERS ===============
+
 def is_series(title):
     t = title.lower()
     return any(x in t for x in ["season", "s01", "s02", "s03", "episode", "ep", "series"])
@@ -54,17 +55,17 @@ def size_from_text(text):
 def clean_title(title):
     return re.sub(r"1TamilMV\s*[-–]\s*", "", title).strip()
 
-# 🔥 LANGUAGE FILTER (MAIN FIX)
+# 🔥 LANGUAGE FILTER – TamilMV SAFE
 def is_allowed_language(title):
     t = title.lower()
 
-    has_telugu = "telugu" in t or " tel " in t or ".tel." in t
-    has_english = "english" in t or " eng " in t or ".eng." in t
+    telugu = any(x in t for x in ["telugu", "+ tel", " tel +", "[tel", " tel]"])
+    english = any(x in t for x in ["english", "+ eng", " eng +", "[eng", " eng]"])
 
-    # Telugu OR English compulsory
-    return has_telugu or has_english
+    # Telugu OR English must exist
+    return telugu or english
 
-# =============== FETCH HOME ==============
+# ================= FETCH HOME =============
 home = scraper.get(BASE_URL, timeout=30)
 soup = BeautifulSoup(home.text, "lxml")
 
@@ -79,7 +80,7 @@ for a in soup.find_all("a", href=True):
 topics = list(dict.fromkeys(topics))[:MAX_TOPICS]
 print("TOPICS FOUND:", len(topics))
 
-# =============== SCRAPE ==================
+# ================= SCRAPE =================
 added = 0
 
 for url in topics:
@@ -88,6 +89,7 @@ for url in topics:
 
     try:
         time.sleep(DELAY)
+
         page = scraper.get(url, timeout=30)
         html = page.text
         psoup = BeautifulSoup(html, "lxml")
@@ -95,21 +97,22 @@ for url in topics:
         raw_title = psoup.title.get_text(strip=True)
         title = clean_title(raw_title)
 
+        print("CHECK:", title)
+
         # ❌ Language reject
         if not is_allowed_language(title):
             continue
 
         size = size_from_text(title)
-        if size is None:
-            continue
 
-        # 🎬 Movie / Series size rules
-        if is_series(title):
-            if size < SERIES_MIN_GB:
-                continue
-        else:
-            if size > MOVIE_MAX_GB:
-                continue
+        # 🎬 Size rules (only if size exists)
+        if size is not None:
+            if is_series(title):
+                if size < SERIES_MIN_GB:
+                    continue
+            else:
+                if size > MOVIE_MAX_GB:
+                    continue
 
         magnets = re.findall(r"(magnet:\?[^\s\"'<]+)", html)
 
@@ -118,7 +121,9 @@ for url in topics:
                 continue
 
             item = SubElement(channel, "item")
-            SubElement(item, "title").text = f"{title} [{round(size,2)}GB]"
+            SubElement(item, "title").text = (
+                f"{title} [{round(size,2)}GB]" if size else title
+            )
             SubElement(item, "link").text = magnet
             SubElement(item, "guid").text = magnet
             SubElement(item, "pubDate").text = datetime.utcnow().strftime(
@@ -135,7 +140,7 @@ for url in topics:
     except Exception as e:
         print("ERROR:", url, e)
 
-# =============== SAVE ====================
+# ================= SAVE ===================
 ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
 json.dump({"magnets": list(seen)}, open(STATE_FILE, "w"), indent=2)
 

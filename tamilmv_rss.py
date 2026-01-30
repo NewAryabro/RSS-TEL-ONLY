@@ -1,7 +1,7 @@
 import cloudscraper, time, json, os, re
 from bs4 import BeautifulSoup
 from datetime import datetime
-from xml.etree.ElementTree import Element, SubElement, ElementTree
+from xml.etree.ElementTree import Element, SubElement, ElementTree, parse
 
 # ================= CONFIG =================
 BASE_URL = "https://www.1tamilmv.rsvp/"
@@ -20,25 +20,27 @@ scraper = cloudscraper.create_scraper()
 
 # ================= STATE =================
 if os.path.exists(STATE_FILE):
-    state = json.load(open(STATE_FILE))
+    with open(STATE_FILE, "r") as f:
+        state = json.load(f)
 else:
     state = {"magnets": []}
 
 seen = set(state.get("magnets", []))
 
-# ================= RSS ===================
-rss = Element("rss", version="2.0")
-channel = SubElement(rss, "channel")
+# ================= RSS LOAD / CREATE =================
+if os.path.exists(OUT_FILE):
+    tree = parse(OUT_FILE)
+    rss = tree.getroot()
+    channel = rss.find("channel")
+else:
+    rss = Element("rss", version="2.0")
+    channel = SubElement(rss, "channel")
 
-SubElement(channel, "title").text = "1TamilMV Torrent RSS"
-SubElement(channel, "link").text = BASE_URL
-SubElement(channel, "description").text = "Auto RSS – Telugu / English Only – Smart Filter"
-SubElement(channel, "lastBuildDate").text = datetime.utcnow().strftime(
-    "%a, %d %b %Y %H:%M:%S GMT"
-)
+    SubElement(channel, "title").text = "1TamilMV Torrent RSS"
+    SubElement(channel, "link").text = BASE_URL
+    SubElement(channel, "description").text = "Auto RSS – Telugu / English Only – Smart Filter"
 
-# ================= HELPERS ===============
-
+# ================= HELPERS =================
 def is_series(title):
     t = title.lower()
     return any(x in t for x in ["season", "s01", "s02", "s03", "episode", "ep", "series"])
@@ -55,17 +57,16 @@ def size_from_text(text):
 def clean_title(title):
     return re.sub(r"1TamilMV\s*[-–]\s*", "", title).strip()
 
-# 🔥 LANGUAGE FILTER – TamilMV SAFE
+# 🔥 LANGUAGE FILTER (TEL / ENG REQUIRED)
 def is_allowed_language(title):
     t = title.lower()
 
     telugu = any(x in t for x in ["telugu", "+ tel", " tel +", "[tel", " tel]"])
     english = any(x in t for x in ["english", "+ eng", " eng +", "[eng", " eng]"])
 
-    # Telugu OR English must exist
     return telugu or english
 
-# ================= FETCH HOME =============
+# ================= FETCH HOME =================
 home = scraper.get(BASE_URL, timeout=30)
 soup = BeautifulSoup(home.text, "lxml")
 
@@ -99,13 +100,13 @@ for url in topics:
 
         print("CHECK:", title)
 
-        # ❌ Language reject
+        # ❌ Language filter
         if not is_allowed_language(title):
             continue
 
         size = size_from_text(title)
 
-        # 🎬 Size rules (only if size exists)
+        # 🎬 Size rules
         if size is not None:
             if is_series(title):
                 if size < SERIES_MIN_GB:
@@ -140,8 +141,23 @@ for url in topics:
     except Exception as e:
         print("ERROR:", url, e)
 
-# ================= SAVE ===================
-ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
-json.dump({"magnets": list(seen)}, open(STATE_FILE, "w"), indent=2)
+# ================= UPDATE BUILD DATE =================
+last = channel.find("lastBuildDate")
+if last is None:
+    last = SubElement(channel, "lastBuildDate")
+
+last.text = datetime.utcnow().strftime(
+    "%a, %d %b %Y %H:%M:%S GMT"
+)
+
+# ================= SAVE =================
+if added > 0:
+    ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
+    print("RSS UPDATED")
+else:
+    print("NO NEW ITEMS – RSS KEPT")
+
+with open(STATE_FILE, "w") as f:
+    json.dump({"magnets": list(seen)}, f, indent=2)
 
 print("✅ DONE | Added:", added)

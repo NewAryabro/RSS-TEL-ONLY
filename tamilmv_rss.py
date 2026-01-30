@@ -20,8 +20,7 @@ scraper = cloudscraper.create_scraper()
 
 # =============== STATE ==================
 if os.path.exists(STATE_FILE):
-    with open(STATE_FILE, "r") as f:
-        state = json.load(f)
+    state = json.load(open(STATE_FILE))
 else:
     state = {"magnets": []}
 
@@ -33,7 +32,7 @@ channel = SubElement(rss, "channel")
 
 SubElement(channel, "title").text = "1TamilMV Torrent RSS"
 SubElement(channel, "link").text = BASE_URL
-SubElement(channel, "description").text = "Auto RSS – Filtered – ≤4GB Movies"
+SubElement(channel, "description").text = "Auto RSS – Telugu / English Only – ≤4GB Movies"
 SubElement(channel, "lastBuildDate").text = datetime.utcnow().strftime(
     "%a, %d %b %Y %H:%M:%S GMT"
 )
@@ -41,7 +40,7 @@ SubElement(channel, "lastBuildDate").text = datetime.utcnow().strftime(
 # =============== HELPERS =================
 def is_series(title):
     t = title.lower()
-    return any(x in t for x in ["season", "s01", "s02", "episode", "ep", "series"])
+    return any(x in t for x in ["season", "s01", "s02", "s03", "episode", "ep", "series"])
 
 def size_from_text(text):
     m = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', text.upper())
@@ -55,19 +54,29 @@ def size_from_text(text):
 def clean_title(title):
     return re.sub(r"1TamilMV\s*[-–]\s*", "", title).strip()
 
+# 🔥 LANGUAGE FILTER (MAIN FIX)
+def is_allowed_language(title):
+    t = title.lower()
+
+    has_telugu = "telugu" in t or " tel " in t or ".tel." in t
+    has_english = "english" in t or " eng " in t or ".eng." in t
+
+    # Telugu OR English compulsory
+    return has_telugu or has_english
+
 # =============== FETCH HOME ==============
 home = scraper.get(BASE_URL, timeout=30)
 soup = BeautifulSoup(home.text, "lxml")
 
-topics = set()
+topics = []
 for a in soup.find_all("a", href=True):
     href = a["href"]
     if "/topic/" in href:
         if not href.startswith("http"):
             href = BASE_URL.rstrip("/") + href
-        topics.add(href)
+        topics.append(href)
 
-topics = list(topics)[:MAX_TOPICS]
+topics = list(dict.fromkeys(topics))[:MAX_TOPICS]
 print("TOPICS FOUND:", len(topics))
 
 # =============== SCRAPE ==================
@@ -86,10 +95,15 @@ for url in topics:
         raw_title = psoup.title.get_text(strip=True)
         title = clean_title(raw_title)
 
+        # ❌ Language reject
+        if not is_allowed_language(title):
+            continue
+
         size = size_from_text(title)
         if size is None:
             continue
 
+        # 🎬 Movie / Series size rules
         if is_series(title):
             if size < SERIES_MIN_GB:
                 continue
@@ -123,8 +137,6 @@ for url in topics:
 
 # =============== SAVE ====================
 ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
-
-with open(STATE_FILE, "w") as f:
-    json.dump({"magnets": list(seen)}, f, indent=2)
+json.dump({"magnets": list(seen)}, open(STATE_FILE, "w"), indent=2)
 
 print("✅ DONE | Added:", added)

@@ -8,7 +8,7 @@ BASE_URL = "https://www.1tamilmv.rsvp/"
 OUT_FILE = "tamilmv.xml"
 STATE_FILE = "state.json"
 
-MAX_TOPICS = 60
+MAX_TOPICS = 120          # scan deep (old + new)
 MAX_ITEMS = 25
 DELAY = 2
 
@@ -23,9 +23,9 @@ if os.path.exists(STATE_FILE):
     with open(STATE_FILE, "r") as f:
         state = json.load(f)
 else:
-    state = {"magnets": []}
+    state = {"seen": {}}
 
-seen = set(state.get("magnets", []))
+seen = state.get("seen", {})   # {post_url: [magnet1, magnet2]}
 
 # ================= RSS LOAD / CREATE =================
 if os.path.exists(OUT_FILE):
@@ -38,12 +38,12 @@ else:
 
     SubElement(channel, "title").text = "1TamilMV Torrent RSS"
     SubElement(channel, "link").text = BASE_URL
-    SubElement(channel, "description").text = "Auto RSS – Telugu / English Only – Smart Filter"
+    SubElement(channel, "description").text = "Auto RSS – Telugu / English / Multi Only"
 
 # ================= HELPERS =================
 def is_series(title):
     t = title.lower()
-    return any(x in t for x in ["season", "s01", "s02", "s03", "episode", "ep", "series"])
+    return any(x in t for x in ["season", "episode", "s01", "s02", "series"])
 
 def size_from_text(text):
     m = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', text.upper())
@@ -57,14 +57,18 @@ def size_from_text(text):
 def clean_title(title):
     return re.sub(r"1TamilMV\s*[-–]\s*", "", title).strip()
 
-# 🔥 LANGUAGE FILTER (TEL / ENG REQUIRED)
+# ✅ REALISTIC LANGUAGE FILTER
 def is_allowed_language(title):
     t = title.lower()
 
-    telugu = any(x in t for x in ["telugu", "+ tel", " tel +", "[tel", " tel]"])
-    english = any(x in t for x in ["english", "+ eng", " eng +", "[eng", " eng]"])
+    # block cases
+    if "tamil + hindi" in t and "english" not in t and "telugu" not in t:
+        return False
+    if "tamil + malayalam" in t:
+        return False
 
-    return telugu or english
+    allow = ["telugu", "english", "eng", "dual", "multi", "dub"]
+    return any(x in t for x in allow)
 
 # ================= FETCH HOME =================
 home = scraper.get(BASE_URL, timeout=30)
@@ -78,8 +82,13 @@ for a in soup.find_all("a", href=True):
             href = BASE_URL.rstrip("/") + href
         topics.append(href)
 
-topics = list(dict.fromkeys(topics))[:MAX_TOPICS]
-print("TOPICS FOUND:", len(topics))
+# remove duplicates
+topics = list(dict.fromkeys(topics))
+
+# scan NEW + OLD
+topics = topics[:MAX_TOPICS//2] + topics[-MAX_TOPICS//2:]
+
+print("TOPICS SCANNED:", len(topics))
 
 # ================= SCRAPE =================
 added = 0
@@ -90,7 +99,6 @@ for url in topics:
 
     try:
         time.sleep(DELAY)
-
         page = scraper.get(url, timeout=30)
         html = page.text
         psoup = BeautifulSoup(html, "lxml")
@@ -98,15 +106,11 @@ for url in topics:
         raw_title = psoup.title.get_text(strip=True)
         title = clean_title(raw_title)
 
-        print("CHECK:", title)
-
-        # ❌ Language filter
         if not is_allowed_language(title):
             continue
 
         size = size_from_text(title)
 
-        # 🎬 Size rules
         if size is not None:
             if is_series(title):
                 if size < SERIES_MIN_GB:
@@ -116,9 +120,13 @@ for url in topics:
                     continue
 
         magnets = re.findall(r"(magnet:\?[^\s\"'<]+)", html)
+        if not magnets:
+            continue
+
+        seen.setdefault(url, [])
 
         for magnet in magnets:
-            if magnet in seen:
+            if magnet in seen[url]:
                 continue
 
             item = SubElement(channel, "item")
@@ -131,7 +139,7 @@ for url in topics:
                 "%a, %d %b %Y %H:%M:%S GMT"
             )
 
-            seen.add(magnet)
+            seen[url].append(magnet)
             added += 1
             print("➕ ADDED:", title)
 
@@ -151,13 +159,9 @@ last.text = datetime.utcnow().strftime(
 )
 
 # ================= SAVE =================
-if added > 0:
-    ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
-    print("RSS UPDATED")
-else:
-    print("NO NEW ITEMS – RSS KEPT")
+ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
 
 with open(STATE_FILE, "w") as f:
-    json.dump({"magnets": list(seen)}, f, indent=2)
+    json.dump({"seen": seen}, f, indent=2)
 
 print("✅ DONE | Added:", added)

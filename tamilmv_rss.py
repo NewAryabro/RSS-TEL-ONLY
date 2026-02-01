@@ -8,9 +8,9 @@ BASE_URL = "https://www.1tamilmv.rsvp/"
 OUT_FILE = "tamilmv.xml"
 STATE_FILE = "state.json"
 
-MAX_TOPICS = 120          # scan deep (old + new)
-MAX_ITEMS = 25
-DELAY = 2
+MAX_TOPICS = 25   # latest topics only
+MAX_ITEMS = 20    # magnets per run
+DELAY = 0.5       # reduce delay for faster runtime
 
 MOVIE_MAX_GB = 4
 SERIES_MIN_GB = 4
@@ -23,9 +23,9 @@ if os.path.exists(STATE_FILE):
     with open(STATE_FILE, "r") as f:
         state = json.load(f)
 else:
-    state = {"seen": {}}
+    state = {"magnets": []}
 
-seen = state.get("seen", {})   # {post_url: [magnet1, magnet2]}
+seen = set(state.get("magnets", []))
 
 # ================= RSS LOAD / CREATE =================
 if os.path.exists(OUT_FILE):
@@ -38,12 +38,15 @@ else:
 
     SubElement(channel, "title").text = "1TamilMV Torrent RSS"
     SubElement(channel, "link").text = BASE_URL
-    SubElement(channel, "description").text = "Auto RSS – Telugu / English / Multi Only"
+    SubElement(channel, "description").text = "Auto RSS – All Movies / Series"
+    SubElement(channel, "lastBuildDate").text = datetime.utcnow().strftime(
+        "%a, %d %b %Y %H:%M:%S GMT"
+    )
 
 # ================= HELPERS =================
 def is_series(title):
     t = title.lower()
-    return any(x in t for x in ["season", "episode", "s01", "s02", "series"])
+    return any(x in t for x in ["season", "s01", "s02", "s03", "episode", "ep", "series"])
 
 def size_from_text(text):
     m = re.search(r'(\d+(?:\.\d+)?)\s*(GB|MB)', text.upper())
@@ -57,19 +60,6 @@ def size_from_text(text):
 def clean_title(title):
     return re.sub(r"1TamilMV\s*[-–]\s*", "", title).strip()
 
-# ✅ REALISTIC LANGUAGE FILTER
-def is_allowed_language(title):
-    t = title.lower()
-
-    # block cases
-    if "tamil + hindi" in t and "english" not in t and "telugu" not in t:
-        return False
-    if "tamil + malayalam" in t:
-        return False
-
-    allow = ["telugu", "english", "eng", "dual", "multi", "dub"]
-    return any(x in t for x in allow)
-
 # ================= FETCH HOME =================
 home = scraper.get(BASE_URL, timeout=30)
 soup = BeautifulSoup(home.text, "lxml")
@@ -82,13 +72,8 @@ for a in soup.find_all("a", href=True):
             href = BASE_URL.rstrip("/") + href
         topics.append(href)
 
-# remove duplicates
-topics = list(dict.fromkeys(topics))
-
-# scan NEW + OLD
-topics = topics[:MAX_TOPICS//2] + topics[-MAX_TOPICS//2:]
-
-print("TOPICS SCANNED:", len(topics))
+topics = list(dict.fromkeys(topics))[:MAX_TOPICS]
+print("TOPICS FOUND:", len(topics))
 
 # ================= SCRAPE =================
 added = 0
@@ -99,6 +84,7 @@ for url in topics:
 
     try:
         time.sleep(DELAY)
+
         page = scraper.get(url, timeout=30)
         html = page.text
         psoup = BeautifulSoup(html, "lxml")
@@ -106,11 +92,9 @@ for url in topics:
         raw_title = psoup.title.get_text(strip=True)
         title = clean_title(raw_title)
 
-        if not is_allowed_language(title):
-            continue
-
         size = size_from_text(title)
 
+        # Movie / Series size rules
         if size is not None:
             if is_series(title):
                 if size < SERIES_MIN_GB:
@@ -120,26 +104,20 @@ for url in topics:
                     continue
 
         magnets = re.findall(r"(magnet:\?[^\s\"'<]+)", html)
-        if not magnets:
-            continue
-
-        seen.setdefault(url, [])
 
         for magnet in magnets:
-            if magnet in seen[url]:
+            if magnet in seen:
                 continue
 
             item = SubElement(channel, "item")
-            SubElement(item, "title").text = (
-                f"{title} [{round(size,2)}GB]" if size else title
-            )
+            SubElement(item, "title").text = f"{title} [{round(size,2)}GB]" if size else title
             SubElement(item, "link").text = magnet
             SubElement(item, "guid").text = magnet
             SubElement(item, "pubDate").text = datetime.utcnow().strftime(
                 "%a, %d %b %Y %H:%M:%S GMT"
             )
 
-            seen[url].append(magnet)
+            seen.add(magnet)
             added += 1
             print("➕ ADDED:", title)
 
@@ -153,15 +131,16 @@ for url in topics:
 last = channel.find("lastBuildDate")
 if last is None:
     last = SubElement(channel, "lastBuildDate")
-
-last.text = datetime.utcnow().strftime(
-    "%a, %d %b %Y %H:%M:%S GMT"
-)
+last.text = datetime.utcnow().strftime("%a, %d %b %Y %H:%M:%S GMT")
 
 # ================= SAVE =================
-ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
+if added > 0:
+    ElementTree(rss).write(OUT_FILE, encoding="utf-8", xml_declaration=True)
+    print("RSS UPDATED")
+else:
+    print("NO NEW ITEMS – RSS KEPT")
 
 with open(STATE_FILE, "w") as f:
-    json.dump({"seen": seen}, f, indent=2)
+    json.dump({"magnets": list(seen)}, f, indent=2)
 
 print("✅ DONE | Added:", added)
